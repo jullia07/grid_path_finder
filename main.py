@@ -4,6 +4,8 @@
 #  실행 방법:  python main.py        (pygame 이 필요: pip install pygame)
 #
 #  [조작법]
+#   - 처음 화면에서 지도 크기 입력 (예: 5*5, 10*8  -> 가로 * 세로)
+#   - 마우스 휠(가운데 버튼)을 누른 채 끌기 : 지도 화면 이동
 #   - 땅 왼쪽 클릭        : 땅 활성화 / 비활성화
 #   - 활성화된 땅 오른쪽 클릭 : 메뉴 (장애물 / 연결 / 출발점 / 도착점)
 #       * "연결"을 고른 뒤 다른 활성화된 땅을 왼쪽 클릭하면 선으로 연결
@@ -21,10 +23,16 @@ import pygame
 # 1. 기본 설정 값 (숫자를 바꾸면 화면 모양이 바뀝니다)
 # ---------------------------------------------------------------------
 WIDTH, HEIGHT = 1000, 700       # 창 크기
-GRID_SIZE = 5                   # 5 x 5 격자
+GRID_COLS = 5                   # 가로 칸 수 (처음 화면에서 바뀜)
+GRID_ROWS = 5                   # 세로 줄 수 (처음 화면에서 바뀜)
+MAX_SIZE = 26                   # 가로/세로 최대 크기 (칸 이름이 A~Z 라서)
 CELL = 100                      # 땅 한 칸의 크기(픽셀)
 GAP = 24                        # 땅과 땅 사이 간격
 GRID_X, GRID_Y = 50, 70         # 격자가 그려지기 시작하는 위치(왼쪽 위)
+LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+# 지도가 보이는 영역 (화면 왼쪽). 지도가 이보다 크면 일부만 보이고 끌어서 이동
+VIEW = pygame.Rect(0, 0, 670, HEIGHT)
 FPS = 60                        # 1초에 화면을 몇 번 다시 그릴지
 ROBOT_SPEED = 4                 # 로봇이 한 프레임에 움직이는 거리(픽셀)
 
@@ -103,8 +111,8 @@ back_rect = back_img.get_rect(bottomright=(WIDTH - 20, HEIGHT - 20))
 # ---------------------------------------------------------------------
 # 3. 게임 데이터 (지도 상태)
 # ---------------------------------------------------------------------
-# active[줄][칸] = True 이면 활성화된 땅
-active = [[False] * GRID_SIZE for _ in range(GRID_SIZE)]
+# active[줄][칸] = True 이면 활성화된 땅 (지도 크기를 정한 뒤 make_map() 에서 만듦)
+active = []
 
 # roles[(줄, 칸)] = "hole"(장애물) / "start"(출발점) / "end"(도착점)
 roles = {}
@@ -112,8 +120,17 @@ roles = {}
 # links[(땅A, 땅B)] = 거리   예) links[((0,0), (0,1))] = 1
 links = {}
 
-# 지금 어떤 화면인지: "edit"(편집) / "sim"(시뮬레이션) / "result"(순위표) / "path"(길 보기)
-mode = "edit"
+# 지금 어떤 화면인지:
+# "setup"(지도 크기 정하기) / "edit"(편집) / "sim"(시뮬레이션) / "result"(순위표) / "path"(길 보기)
+mode = "setup"
+
+# 지도 크기 정하기 화면에서 쓰는 값들
+size_text = "5*5"         # 입력 중인 지도 크기
+setup_message = ""        # 잘못 입력했을 때 보여 줄 글
+
+# 카메라: 지도가 화면보다 클 때, 지도의 어느 부분을 보고 있는지
+camera_x, camera_y = 0, 0
+dragging = False          # 마우스 휠 버튼을 누른 채 끌고 있는지
 
 # 편집 화면에서 쓰는 값들
 menu_cell = None          # 오른쪽 클릭 메뉴가 열린 땅 (없으면 None)
@@ -127,7 +144,7 @@ message = "땅을 왼쪽 클릭해서 활성화해 보세요."
 routes = []               # 찾은 모든 길
 sim_index = 0             # 지금 보여주는 길 번호
 sim_step = 0              # 그 길에서 몇 번째 땅으로 가는 중인지
-robot_pos = [0.0, 0.0]    # 로봇의 화면 위치
+robot_pos = [0.0, 0.0]    # 로봇의 지도 위 위치 (카메라와 상관없는 위치)
 robot_angle = 0           # 로봇이 바라보는 방향(회전 각도)
 wait_timer = 0            # 길 하나가 끝나고 잠깐 쉬는 시간
 
@@ -140,31 +157,82 @@ chosen_route = None       # "길 보기"로 고른 길
 # ---------------------------------------------------------------------
 # 4. 작은 도우미 함수들
 # ---------------------------------------------------------------------
-def cell_rect(cell):
-    """땅 (줄, 칸) 이 화면에서 차지하는 사각형"""
+# ※ 위치에는 두 종류가 있어요.
+#   - 지도 위치 : 지도 왼쪽 위를 기준으로 한 위치 (카메라가 움직여도 그대로)
+#   - 화면 위치 : 실제 창에 그려지는 위치 = 지도 위치 - 카메라 위치
+def cell_map_center(cell):
+    """땅 (줄, 칸) 의 가운데 '지도 위치'"""
     row, col = cell
-    x = GRID_X + col * (CELL + GAP)
-    y = GRID_Y + row * (CELL + GAP)
-    return pygame.Rect(x, y, CELL, CELL)
+    x = GRID_X + col * (CELL + GAP) + CELL // 2
+    y = GRID_Y + row * (CELL + GAP) + CELL // 2
+    return (x, y)
+
+
+def to_screen(pos):
+    """지도 위치 -> 화면 위치"""
+    return (pos[0] - camera_x, pos[1] - camera_y)
 
 
 def cell_center(cell):
-    return cell_rect(cell).center
+    """땅 (줄, 칸) 의 가운데 '화면 위치'"""
+    return to_screen(cell_map_center(cell))
+
+
+def cell_rect(cell):
+    """땅 (줄, 칸) 이 화면에서 차지하는 사각형"""
+    rect = pygame.Rect(0, 0, CELL, CELL)
+    rect.center = cell_center(cell)
+    return rect
 
 
 def cell_name(cell):
     """(0,0) -> 'A1' 처럼 사람이 읽기 쉬운 이름으로 바꾸기"""
     row, col = cell
-    return "ABCDE"[col] + str(row + 1)
+    return LETTERS[col] + str(row + 1)
 
 
 def cell_at(pos):
     """마우스 위치에 있는 땅을 찾기 (없으면 None)"""
-    for row in range(GRID_SIZE):
-        for col in range(GRID_SIZE):
+    if not VIEW.collidepoint(pos):          # 지도 영역 밖이면 땅이 아님
+        return None
+    for row in range(GRID_ROWS):
+        for col in range(GRID_COLS):
             if cell_rect((row, col)).collidepoint(pos):
                 return (row, col)
     return None
+
+
+def make_map(cols, rows):
+    """정한 크기로 빈 지도 만들기"""
+    global GRID_COLS, GRID_ROWS, active, camera_x, camera_y
+    GRID_COLS, GRID_ROWS = cols, rows
+    active = [[False] * cols for _ in range(rows)]
+    roles.clear()
+    links.clear()
+    camera_x, camera_y = 0, 0
+
+
+def move_camera(dx, dy):
+    """카메라를 움직이되, 지도 밖으로 너무 나가지 않게 막기"""
+    global camera_x, camera_y
+    map_w = GRID_X + GRID_COLS * (CELL + GAP) + 20   # 지도 전체 가로 길이
+    map_h = GRID_Y + GRID_ROWS * (CELL + GAP) + 20   # 지도 전체 세로 길이
+    max_x = max(0, map_w - VIEW.width)
+    max_y = max(0, map_h - VIEW.height)
+    camera_x = max(0, min(max_x, camera_x + dx))
+    camera_y = max(0, min(max_y, camera_y + dy))
+
+
+def focus_on(cell):
+    """cell 이 지도 영역 가운데에 오도록 카메라 옮기기"""
+    x, y = cell_center(cell)
+    move_camera(x - VIEW.centerx, y - VIEW.centery)
+
+
+def map_is_big():
+    """지도가 보이는 영역보다 큰지"""
+    return (GRID_X + GRID_COLS * (CELL + GAP) > VIEW.width
+            or GRID_Y + GRID_ROWS * (CELL + GAP) > VIEW.height)
 
 
 def link_key(a, b):
@@ -194,6 +262,8 @@ def distance_to_line(p, a, b):
 
 def link_at(pos):
     """마우스 위치에 있는 연결선 찾기 (없으면 None)"""
+    if not VIEW.collidepoint(pos):
+        return None
     for key in links:
         a, b = cell_center(key[0]), cell_center(key[1])
         middle = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
@@ -225,15 +295,23 @@ def draw_text(text, font, color, pos, center=False):
 
 
 def draw_grid():
-    """격자(땅, 장애물, 출발점, 도착점)와 줄/칸 이름 그리기"""
-    for i in range(GRID_SIZE):
-        draw_text("ABCDE"[i], FONT, GRAY, (cell_rect((0, i)).centerx, GRID_Y - 20), center=True)
-        draw_text(str(i + 1), FONT, GRAY, (GRID_X - 20, cell_rect((i, 0)).centery), center=True)
+    """격자(땅, 장애물, 출발점, 도착점)와 줄/칸 이름 그리기
+    ※ 지도 영역(VIEW) 밖으로는 그려지지 않도록 set_clip 으로 잘라냅니다.
+      지도를 다 그린 뒤에는 end_map_drawing() 을 불러 잘라내기를 끕니다."""
+    screen.set_clip(VIEW)
+    for col in range(GRID_COLS):
+        x = cell_center((0, col))[0]
+        draw_text(LETTERS[col], FONT, GRAY, (x, GRID_Y - 20 - camera_y), center=True)
+    for row in range(GRID_ROWS):
+        y = cell_center((row, 0))[1]
+        draw_text(str(row + 1), FONT, GRAY, (GRID_X - 25 - camera_x, y), center=True)
 
-    for row in range(GRID_SIZE):
-        for col in range(GRID_SIZE):
+    for row in range(GRID_ROWS):
+        for col in range(GRID_COLS):
             cell = (row, col)
             rect = cell_rect(cell)
+            if not rect.colliderect(VIEW):   # 화면에 안 보이는 땅은 건너뛰기
+                continue
             image = place_img if active[row][col] else place_off_img
             screen.blit(image, image.get_rect(center=rect.center))
 
@@ -244,6 +322,14 @@ def draw_grid():
                 screen.blit(start_img, start_img.get_rect(center=rect.center))
             elif role == "end":
                 screen.blit(end_img, end_img.get_rect(center=rect.center))
+
+
+def end_map_drawing():
+    """지도 그리기를 끝내고, 오른쪽 안내 영역과 나눔선 그리기"""
+    screen.set_clip(None)
+    pygame.draw.line(screen, GRAY, (VIEW.right, 0), (VIEW.right, HEIGHT), 1)
+    if map_is_big():
+        draw_text("휠 버튼을 누른 채 끌기: 화면 이동", FONT_SMALL, GRAY, (690, 20))
 
 
 def draw_link(key, color, width=5):
@@ -263,7 +349,8 @@ def draw_all_links():
 
 def draw_robot():
     image = pygame.transform.rotate(robot_img, robot_angle)
-    screen.blit(image, image.get_rect(center=(int(robot_pos[0]), int(robot_pos[1]))))
+    x, y = to_screen(robot_pos)          # 로봇 위치는 지도 위치라서 화면 위치로 바꿈
+    screen.blit(image, image.get_rect(center=(int(x), int(y))))
 
 
 def draw_menu():
@@ -297,6 +384,7 @@ def draw_edit_screen():
     # 연결 중이면 출발 땅에서 마우스까지 점선 느낌의 선
     if connect_from is not None:
         pygame.draw.line(screen, PATH_COLOR, cell_center(connect_from), pygame.mouse.get_pos(), 2)
+    end_map_drawing()
 
     # 오른쪽 안내 영역
     screen.blit(go_img if can_start() else go_off_img, go_rect)
@@ -332,6 +420,7 @@ def draw_sim_screen():
     for i in range(sim_step):
         pygame.draw.line(screen, PATH_COLOR, cell_center(route[i]), cell_center(route[i + 1]), 7)
     draw_robot()
+    end_map_drawing()
 
     draw_text("시뮬레이션 중...", FONT_BIG, WHITE, (690, 80))
     draw_text(f"길 {sim_index + 1} / {len(routes)} 탐색 중", FONT, WHITE, (690, 140))
@@ -399,6 +488,7 @@ def draw_path_screen():
         pygame.draw.circle(screen, (20, 20, 30), (rect.x + 16, rect.y + 16), 13)
         draw_text(str(i + 1), FONT_SMALL, WHITE, (rect.x + 16, rect.y + 16), center=True)
     draw_robot()
+    end_map_drawing()
 
     draw_text("선택한 길", FONT_BIG, WHITE, (690, 80))
     if chosen_route["ok"]:
@@ -602,6 +692,7 @@ def start_simulation():
     routes = find_all_routes()
     sim_index = 0
     start_route()
+    focus_on(find_role("start"))      # 출발점이 화면 가운데 오도록
     mode = "sim"
 
 
@@ -609,7 +700,7 @@ def start_route():
     """sim_index 번째 길을 처음부터 시작"""
     global sim_step, robot_pos, wait_timer
     first = routes[sim_index]["path"][0]
-    robot_pos = list(cell_center(first))
+    robot_pos = list(cell_map_center(first))
     sim_step = 0
     wait_timer = 0
 
@@ -621,7 +712,7 @@ def update_simulation():
 
     if sim_step < len(route) - 1:
         # 다음 땅을 향해 이동
-        tx, ty = cell_center(route[sim_step + 1])
+        tx, ty = cell_map_center(route[sim_step + 1])
         dx, dy = tx - robot_pos[0], ty - robot_pos[1]
         distance = math.hypot(dx, dy)
         # 로봇 그림은 왼쪽이 앞이므로 180도를 빼서 방향을 맞춤
@@ -632,6 +723,7 @@ def update_simulation():
         else:
             robot_pos[0] += dx / distance * ROBOT_SPEED
             robot_pos[1] += dy / distance * ROBOT_SPEED
+        follow_robot()
     else:
         # 길 끝에 도착 -> 잠깐 쉬었다가 다음 길
         wait_timer += 1
@@ -641,6 +733,24 @@ def update_simulation():
                 start_route()
             else:
                 show_result()
+
+
+def follow_robot():
+    """로봇이 화면 가장자리로 가면 카메라가 따라감 (끌고 있는 중에는 따라가지 않음)"""
+    if dragging:
+        return
+    x, y = to_screen(robot_pos)
+    safe = VIEW.inflate(-200, -200)      # 이 안쪽에 로봇이 있으면 그대로 둠
+    dx = dy = 0
+    if x < safe.left:
+        dx = x - safe.left
+    elif x > safe.right:
+        dx = x - safe.right
+    if y < safe.top:
+        dy = y - safe.top
+    elif y > safe.bottom:
+        dy = y - safe.bottom
+    move_camera(dx, dy)
 
 
 def show_result():
@@ -669,7 +779,8 @@ def handle_result_event(event):
             if view_button_rect(i).collidepoint(event.pos):
                 chosen_route = route
                 path = route["path"]
-                robot_pos = list(cell_center(path[-1]))   # 로봇은 길 끝에 세움
+                robot_pos = list(cell_map_center(path[-1]))   # 로봇은 길 끝에 세움
+                focus_on(path[-1])
                 if len(path) > 1:
                     (x1, y1), (x2, y2) = cell_center(path[-2]), cell_center(path[-1])
                     robot_angle = math.degrees(math.atan2(-(y2 - y1), x2 - x1)) - 180
@@ -684,7 +795,78 @@ def handle_path_event(event):
 
 
 # ---------------------------------------------------------------------
-# 9. 메인 반복문 (게임의 심장)
+# 9. 지도 크기 정하기 화면 (프로그램을 켜면 가장 먼저 나옴)
+# ---------------------------------------------------------------------
+setup_go_rect = go_img.get_rect(center=(WIDTH // 2, 470))
+
+
+def draw_setup_screen():
+    draw_text("격자지도에서 이동경로 최소화", FONT_BIG, WHITE, (WIDTH // 2, 140), center=True)
+    draw_text("지도 크기를  가로 * 세로  로 입력하세요", FONT, WHITE, (WIDTH // 2, 240), center=True)
+    draw_text(f"예) 5*5,  10*8   (가로·세로 각각 2 ~ {MAX_SIZE})", FONT_SMALL, GRAY,
+              (WIDTH // 2, 275), center=True)
+
+    field = pygame.Rect(0, 0, 260, 54)
+    field.center = (WIDTH // 2, 345)
+    pygame.draw.rect(screen, WHITE, field, border_radius=8)
+    draw_text(size_text + "|", FONT_BIG, (0, 0, 0), field.center, center=True)
+
+    draw_text(setup_message, FONT_SMALL, FAIL_COLOR, (WIDTH // 2, 395), center=True)
+    screen.blit(go_img, setup_go_rect)
+    draw_text("Enter 키를 눌러도 시작합니다.", FONT_SMALL, GRAY, (WIDTH // 2, 540), center=True)
+
+
+def read_size(text):
+    """'10*8' 같은 글자를 (가로, 세로) 숫자로 바꾸기. 잘못되면 None"""
+    text = text.replace("x", "*").replace("X", "*").replace(" ", "")
+    parts = text.split("*")
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        return None
+    cols, rows = int(parts[0]), int(parts[1])
+    if not (2 <= cols <= MAX_SIZE and 2 <= rows <= MAX_SIZE):
+        return None
+    return cols, rows
+
+
+def finish_setup():
+    global mode, setup_message, message
+    size = read_size(size_text)
+    if size is None:
+        setup_message = f"형식이 틀렸어요. 예) 10*8  (2 ~ {MAX_SIZE} 사이 숫자)"
+        return
+    make_map(size[0], size[1])
+    message = f"{size[0]} x {size[1]} 지도를 만들었습니다!"
+    mode = "edit"
+
+
+def handle_setup_event(event):
+    global size_text
+    if event.type == pygame.KEYDOWN:
+        if event.key == pygame.K_RETURN:
+            finish_setup()
+        elif event.key == pygame.K_BACKSPACE:
+            size_text = size_text[:-1]
+        elif event.unicode != "" and event.unicode in "0123456789*xX" and len(size_text) < 7:
+            size_text += event.unicode
+    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+        if setup_go_rect.collidepoint(event.pos):
+            finish_setup()
+
+
+def handle_drag_event(event):
+    """마우스 휠 버튼(가운데 버튼)을 누른 채 끌면 지도 화면이 움직임"""
+    global dragging
+    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 2 and VIEW.collidepoint(event.pos):
+        dragging = True
+    elif event.type == pygame.MOUSEBUTTONUP and event.button == 2:
+        dragging = False
+    elif event.type == pygame.MOUSEMOTION and dragging:
+        # 마우스를 오른쪽으로 끌면 지도가 오른쪽으로 따라오도록 (카메라는 반대로)
+        move_camera(-event.rel[0], -event.rel[1])
+
+
+# ---------------------------------------------------------------------
+# 10. 메인 반복문 (게임의 심장)
 # ---------------------------------------------------------------------
 running = True
 while running:
@@ -692,6 +874,12 @@ while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+            continue
+        if mode in ("edit", "sim", "path"):   # 지도가 보이는 화면에서는 끌어서 이동 가능
+            handle_drag_event(event)
+
+        if mode == "setup":
+            handle_setup_event(event)
         elif mode == "edit":
             handle_edit_event(event)
         elif mode == "sim":
@@ -708,7 +896,9 @@ while running:
 
     # (3) 화면 그리기
     screen.fill(BG_COLOR)
-    if mode == "edit":
+    if mode == "setup":
+        draw_setup_screen()
+    elif mode == "edit":
         draw_edit_screen()
     elif mode == "sim":
         draw_sim_screen()
