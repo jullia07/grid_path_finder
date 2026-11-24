@@ -5,7 +5,10 @@
 #
 #  [조작법]
 #   - 처음 화면에서 지도 크기 입력 (예: 5*5, 10*8  -> 가로 * 세로)
-#   - 마우스 휠(가운데 버튼)을 누른 채 끌기 : 지도 화면 이동
+#       * 가로나 세로가 10 이상이면 지도 일부만 보이고,
+#         마우스 휠(가운데 버튼)을 누른 채 끌어서 화면을 이동
+#       * 10보다 작으면 지도 전체가 화면에 맞게 보임
+#   - [랜덤] 버튼          : 길, 장애물, 출발점, 도착점을 무작위로 만들기
 #   - 땅 왼쪽 클릭        : 땅 활성화 / 비활성화
 #   - 활성화된 땅 오른쪽 클릭 : 메뉴 (장애물 / 연결 / 출발점 / 도착점)
 #       * "연결"을 고른 뒤 다른 활성화된 땅을 왼쪽 클릭하면 선으로 연결
@@ -17,6 +20,7 @@
 
 import math
 import os
+import random
 import pygame
 
 # ---------------------------------------------------------------------
@@ -26,12 +30,14 @@ WIDTH, HEIGHT = 1000, 700       # 창 크기
 GRID_COLS = 5                   # 가로 칸 수 (처음 화면에서 바뀜)
 GRID_ROWS = 5                   # 세로 줄 수 (처음 화면에서 바뀜)
 MAX_SIZE = 26                   # 가로/세로 최대 크기 (칸 이름이 A~Z 라서)
-CELL = 100                      # 땅 한 칸의 크기(픽셀)
-GAP = 24                        # 땅과 땅 사이 간격
+SCROLL_SIZE = 10                # 가로나 세로가 이 값 이상이면 '일부만 보이기 + 끌어서 이동'
+CELL = 100                      # 땅 한 칸의 크기(픽셀). 작은 지도에서는 화면에 맞게 줄어듦
+GAP = 24                        # 땅과 땅 사이 간격 (CELL 에 맞춰 바뀜)
 GRID_X, GRID_Y = 50, 70         # 격자가 그려지기 시작하는 위치(왼쪽 위)
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+MAX_ROUTES = 500                # 길이 너무 많으면 여기까지만 탐색 (프로그램이 멈추지 않게)
 
-# 지도가 보이는 영역 (화면 왼쪽). 지도가 이보다 크면 일부만 보이고 끌어서 이동
+# 지도가 보이는 영역 (화면 왼쪽)
 VIEW = pygame.Rect(0, 0, 670, HEIGHT)
 FPS = 60                        # 1초에 화면을 몇 번 다시 그릴지
 ROBOT_SPEED = 4                 # 로봇이 한 프레임에 움직이는 거리(픽셀)
@@ -78,18 +84,26 @@ def load_image(filename, max_w, max_h):
     return pygame.transform.smoothscale(image, (int(w * scale), int(h * scale)))
 
 
-# 오브젝트 이미지들
-place_img = load_image("place_object.png", CELL, CELL)          # 활성화된 땅
-hole_img = load_image("holl_object.png", CELL * 0.8, CELL * 0.8)  # 장애물
-start_img = load_image("start_object.png", CELL * 0.8, CELL * 0.8)  # 출발점
-end_img = load_image("end_object.png", CELL * 0.8, CELL * 0.8)      # 도착점
-robot_img = load_image("robot_object.png", CELL * 0.75, CELL * 0.75)  # 로봇 (왼쪽이 앞)
+# 지도 위 오브젝트 이미지들 (땅 크기 CELL 에 맞춰야 해서 함수로 만듦)
+def load_map_images():
+    """땅 크기(CELL)에 맞게 지도 그림들을 불러오기. 지도 크기가 바뀔 때마다 다시 부름"""
+    global place_img, place_off_img, hole_img, start_img, end_img, robot_img
+    place_img = load_image("place_object.png", CELL, CELL)              # 활성화된 땅
+    hole_img = load_image("holl_object.png", CELL * 0.8, CELL * 0.8)      # 장애물
+    start_img = load_image("start_object.png", CELL * 0.8, CELL * 0.8)    # 출발점
+    end_img = load_image("end_object.png", CELL * 0.8, CELL * 0.8)        # 도착점
+    robot_img = load_image("robot_object.png", CELL * 0.75, CELL * 0.75)  # 로봇 (왼쪽이 앞)
+
+    # 비활성화된 땅: 활성화 땅 그림을 어둡게 만든 것
+    place_off_img = place_img.copy()
+    place_off_img.fill((70, 70, 70), special_flags=pygame.BLEND_RGB_MULT)
+
+
+load_map_images()
+
+# 버튼 이미지들
 go_img = load_image("go_butten_object.png", 240, 80)            # 시작 버튼
 back_img = load_image("back_butten_object.png", 180, 60)        # 나가기 버튼
-
-# 비활성화된 땅: 활성화 땅 그림을 어둡게 만든 것
-place_off_img = place_img.copy()
-place_off_img.fill((70, 70, 70), special_flags=pygame.BLEND_RGB_MULT)
 
 # 꺼진 시작 버튼: 시작 버튼을 회색으로 만든 것
 go_off_img = pygame.transform.grayscale(go_img)
@@ -103,8 +117,18 @@ else:
     label = FONT_SMALL.render("길 보기", True, WHITE)
     view_img.blit(label, label.get_rect(center=(50, 18)))
 
+# 랜덤 버튼 (make_objects.py 로 만든 그림, 없으면 바로 그려서 사용)
+if os.path.exists(os.path.join(FOLDER, "random_butten_object.png")):
+    random_img = load_image("random_butten_object.png", 200, 60)
+else:
+    random_img = pygame.Surface((180, 60), pygame.SRCALPHA)
+    pygame.draw.rect(random_img, (150, 70, 220), random_img.get_rect(), border_radius=20)
+    label = FONT.render("랜덤", True, WHITE)
+    random_img.blit(label, label.get_rect(center=(90, 30)))
+
 # 버튼 위치
 go_rect = go_img.get_rect(center=(820, 120))
+random_rect = random_img.get_rect(center=(820, 205))
 back_rect = back_img.get_rect(bottomright=(WIDTH - 20, HEIGHT - 20))
 
 
@@ -204,12 +228,29 @@ def cell_at(pos):
 
 def make_map(cols, rows):
     """정한 크기로 빈 지도 만들기"""
-    global GRID_COLS, GRID_ROWS, active, camera_x, camera_y
+    global GRID_COLS, GRID_ROWS, CELL, GAP, active, camera_x, camera_y
     GRID_COLS, GRID_ROWS = cols, rows
+
+    # 땅 크기 정하기
+    if use_scroll():
+        CELL = 100        # 큰 지도: 땅은 원래 크기, 화면은 일부만 보임
+    else:
+        # 작은 지도: 지도 전체가 화면(VIEW)에 들어가도록 땅 크기를 줄임
+        step_w = (VIEW.width - GRID_X - 20) / cols    # 한 칸(땅+간격)이 쓸 수 있는 가로 길이
+        step_h = (VIEW.height - GRID_Y - 20) / rows   # 한 칸이 쓸 수 있는 세로 길이
+        CELL = min(100, int(min(step_w, step_h) / 1.24))
+    GAP = int(CELL * 0.24)
+    load_map_images()     # 땅 크기가 바뀌었으니 그림 크기도 다시 맞춤
+
     active = [[False] * cols for _ in range(rows)]
     roles.clear()
     links.clear()
     camera_x, camera_y = 0, 0
+
+
+def use_scroll():
+    """가로나 세로가 SCROLL_SIZE(10) 이상이면 '일부만 보이기 + 끌어서 이동'을 씀"""
+    return GRID_COLS >= SCROLL_SIZE or GRID_ROWS >= SCROLL_SIZE
 
 
 def move_camera(dx, dy):
@@ -227,12 +268,6 @@ def focus_on(cell):
     """cell 이 지도 영역 가운데에 오도록 카메라 옮기기"""
     x, y = cell_center(cell)
     move_camera(x - VIEW.centerx, y - VIEW.centery)
-
-
-def map_is_big():
-    """지도가 보이는 영역보다 큰지"""
-    return (GRID_X + GRID_COLS * (CELL + GAP) > VIEW.width
-            or GRID_Y + GRID_ROWS * (CELL + GAP) > VIEW.height)
 
 
 def link_key(a, b):
@@ -328,7 +363,7 @@ def end_map_drawing():
     """지도 그리기를 끝내고, 오른쪽 안내 영역과 나눔선 그리기"""
     screen.set_clip(None)
     pygame.draw.line(screen, GRAY, (VIEW.right, 0), (VIEW.right, HEIGHT), 1)
-    if map_is_big():
+    if use_scroll():
         draw_text("휠 버튼을 누른 채 끌기: 화면 이동", FONT_SMALL, GRAY, (690, 20))
 
 
@@ -388,8 +423,10 @@ def draw_edit_screen():
 
     # 오른쪽 안내 영역
     screen.blit(go_img if can_start() else go_off_img, go_rect)
+    screen.blit(random_img, random_rect)
     help_lines = [
         "[ 사용 방법 ]",
+        "랜덤 버튼: 지도를 무작위로 만들기",
         "땅 왼쪽 클릭: 활성화 / 비활성화",
         "땅 오른쪽 클릭: 메뉴 열기",
         "   장애물 / 연결 / 출발점 / 도착점",
@@ -401,9 +438,9 @@ def draw_edit_screen():
         "시작 버튼이 켜집니다.",
     ]
     for i, line in enumerate(help_lines):
-        draw_text(line, FONT_SMALL, WHITE, (690, 200 + i * 26))
+        draw_text(line, FONT_SMALL, WHITE, (690, 260 + i * 26))
 
-    draw_text(message, FONT_SMALL, PATH_COLOR, (690, 480))
+    draw_text(message, FONT_SMALL, PATH_COLOR, (690, 570))
 
     if menu_cell is not None:
         draw_menu()
@@ -440,6 +477,8 @@ def draw_result_screen():
     draw_text("순위표", FONT_BIG, WHITE, (40, 25))
     ok_count = sum(1 for r in ranking if r["ok"])
     draw_text(f"탐색한 길 {len(ranking)}개  /  도착 가능한 길 {ok_count}개", FONT, GRAY, (180, 35))
+    if len(ranking) >= MAX_ROUTES:
+        draw_text(f"(길이 너무 많아서 {MAX_ROUTES}개까지만 탐색했어요)", FONT_SMALL, FAIL_COLOR, (180, 68))
 
     # 제목 줄
     headers = [("순위", 40), ("경로", 120), ("이동 가능 여부", 625), ("거리", 785)]
@@ -461,8 +500,11 @@ def draw_result_screen():
             dist_text = "-"
 
         path_text = " → ".join(cell_name(c) for c in route["path"])
-        if len(path_text) > 60:  # 너무 길면 줄이기
-            path_text = path_text[:58] + "..."
+        # 너무 길면 '이동 가능 여부' 칸을 침범하지 않게 뒤를 잘라서 "..." 붙이기
+        if FONT_SMALL.size(path_text)[0] > 480:
+            while FONT_SMALL.size(path_text + " ...")[0] > 480:
+                path_text = path_text[:-1]
+            path_text += " ..."
 
         draw_text(rank_text, FONT, color, (40, y + 8))
         draw_text(path_text, FONT_SMALL, WHITE, (120, y + 10))
@@ -615,6 +657,12 @@ def handle_edit_event(event):
         start_simulation()
         return
 
+    # --- 랜덤 버튼 ---
+    if left and random_rect.collidepoint(pos):
+        make_random_map()
+        message = "랜덤 지도를 만들었습니다!"
+        return
+
     # --- 연결선 클릭 ---
     key = link_at(pos)
     if key is not None:
@@ -661,12 +709,15 @@ def find_all_routes():
     - 도착점에 닿으면 '성공한 길'
     - 더 갈 곳이 없으면 '막힌 길'
     - 한 번 밟은 땅은 다시 밟지 않습니다.
+    - 길이 너무 많으면 MAX_ROUTES 개까지만 찾습니다.
     """
     start = find_role("start")
     end = find_role("end")
     found = []
 
     def explore(cell, path, dist):
+        if len(found) >= MAX_ROUTES:                      # 충분히 많이 찾았으면 그만
+            return
         if cell == end:                                   # 도착!
             found.append({"path": list(path), "dist": dist, "ok": True})
             return
@@ -685,6 +736,89 @@ def find_all_routes():
 
     explore(start, [start], 0)
     return found
+
+
+# ---------------------------------------------------------------------
+# 7-1. 랜덤 지도 만들기
+# ---------------------------------------------------------------------
+def all_cells():
+    return [(row, col) for row in range(GRID_ROWS) for col in range(GRID_COLS)]
+
+
+def side_neighbors(cell):
+    """위/아래/왼쪽/오른쪽 이웃 땅 (지도 밖은 빼고)"""
+    row, col = cell
+    result = []
+    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        r, c = row + dr, col + dc
+        if 0 <= r < GRID_ROWS and 0 <= c < GRID_COLS:
+            result.append((r, c))
+    return result
+
+
+def add_random_link(a, b):
+    """두 땅을 활성화하고 랜덤 거리(1~5)로 연결"""
+    active[a[0]][a[1]] = True
+    active[b[0]][b[1]] = True
+    links[link_key(a, b)] = random.randint(1, 5)
+
+
+def make_random_map():
+    """랜덤으로 길을 만들고 장애물을 설치합니다.
+    1) 출발점과 도착점을 무작위로 고르고, 둘을 잇는 '큰길'을 만든다 (그래서 항상 도착 가능!)
+    2) 큰길에서 곁가지 길을 여기저기 뻗는다
+    3) 이미 있는 땅끼리 몇 군데 더 이어서 돌아가는 길(고리)을 만든다
+    4) 큰길이 아닌 땅 몇 곳에 장애물을 놓는다
+    """
+    global camera_x, camera_y
+    # 지도 비우기 (크기는 그대로)
+    for row in range(GRID_ROWS):
+        for col in range(GRID_COLS):
+            active[row][col] = False
+    roles.clear()
+    links.clear()
+    camera_x, camera_y = 0, 0
+
+    cells = all_cells()
+    total = len(cells)
+
+    # 1) 출발점, 도착점, 그리고 둘을 잇는 큰길
+    start, end = random.sample(cells, 2)
+    # 도착점까지 가려면 가로로 몇 칸, 세로로 몇 칸 가야 하는지 계산해서
+    # 그 이동들을 섞으면 구불구불한 큰길이 됨
+    dr = 1 if end[0] > start[0] else -1
+    dc = 1 if end[1] > start[1] else -1
+    moves = [(dr, 0)] * abs(end[0] - start[0]) + [(0, dc)] * abs(end[1] - start[1])
+    random.shuffle(moves)
+    road = [start]
+    for mr, mc in moves:
+        last = road[-1]
+        road.append((last[0] + mr, last[1] + mc))
+    for a, b in zip(road, road[1:]):
+        add_random_link(a, b)
+    active[start[0]][start[1]] = True
+
+    # 2) 곁가지: 활성화된 땅 옆의 빈 땅을 하나씩 붙여 나감
+    for _ in range(total // 2):
+        here = random.choice([c for c in cells if active[c[0]][c[1]]])
+        there = random.choice(side_neighbors(here))
+        if not active[there[0]][there[1]]:
+            add_random_link(here, there)
+
+    # 3) 고리: 이웃한 활성화된 땅인데 아직 연결이 없으면 몇 군데 연결
+    for _ in range(max(3, total // 8)):
+        here = random.choice([c for c in cells if active[c[0]][c[1]]])
+        there = random.choice(side_neighbors(here))
+        if active[there[0]][there[1]] and link_key(here, there) not in links:
+            add_random_link(here, there)
+
+    # 4) 장애물: 큰길이 아닌 활성화된 땅 중 약 20%
+    others = [c for c in cells if active[c[0]][c[1]] and c not in road]
+    for cell in random.sample(others, len(others) // 5):
+        roles[cell] = "hole"
+
+    roles[start] = "start"
+    roles[end] = "end"
 
 
 def start_simulation():
@@ -856,6 +990,8 @@ def handle_setup_event(event):
 def handle_drag_event(event):
     """마우스 휠 버튼(가운데 버튼)을 누른 채 끌면 지도 화면이 움직임"""
     global dragging
+    if not use_scroll():          # 작은 지도는 다 보이니까 움직일 필요 없음
+        return
     if event.type == pygame.MOUSEBUTTONDOWN and event.button == 2 and VIEW.collidepoint(event.pos):
         dragging = True
     elif event.type == pygame.MOUSEBUTTONUP and event.button == 2:
